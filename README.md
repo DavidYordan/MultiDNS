@@ -1,4 +1,3 @@
-
     # MultiDNS
 
     MultiDNS is a highly customizable DNS service developed in Go. It processes DNS query requests on multiple ports according to different configuration files and rules, and applies different caching strategies based on a specific domain list (cn_site.list). This service is particularly suitable for scenarios that require dynamically selecting the optimal resolution path based on the origin or content of the request.
