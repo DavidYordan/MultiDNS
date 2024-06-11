@@ -1,43 +1,155 @@
-# Custom DNS Service
+    ```
+    # MultiDNS
 
-This project provides a custom DNS service designed to handle multiple nameservers with specific caching strategies for each. It's particularly useful for managing DNS queries across different geographic locations with optimized responses based on the originating request's characteristics.
+    MultiDNS is a highly customizable DNS service developed in Go. It processes DNS query requests on multiple ports according to different configuration files and rules, and applies different caching strategies based on a specific domain list (cn_site.list). This service is particularly suitable for scenarios that require dynamically selecting the optimal resolution path based on the origin or content of the request.
 
-## Overview
+    ## Project Structure
 
-The Custom DNS Service routes DNS queries through specific paths based on the request origin and the requested domain. It utilizes a series of predefined rules to either use a general cache or a specialized cache for Chinese domains (referred to as `cache_cn`). The architecture allows for dynamic routing of DNS requests to optimize resolution speed and accuracy.
+    ```
+    /multidns
+    │
+    ├── internal
+    │   ├── config
+    │   │   └── config.go       # Configuration loading and handling
+    │   ├── dns
+    │   │   ├── server.go       # DNS server startup logic
+    │   │   ├── request.go      # Request handling logic
+    │   │   ├── socket.go       # Socket creation logic
+    │   │   └── upstream.go     # Upstream DNS query logic
+    │   └── utils
+    │       └── utils.go        # Utility functions
+    │
+    ├── pkg
+    │   ├── cache
+    │   │   └── cache.go        # Cache handling logic
+    │
+    ├── cmd
+    │   └── multidns
+    │       └── main.go         # Main entry point, responsible for starting the service
+    │
+    ├── .gitignore
+    ├── go.mod
+    └── go.sum
+    ```
 
-## Architecture
+    ## Features
 
-![DNS Routing Diagram](img/1.png)
+    - **Multi-port Listening**: Capable of listening for DNS queries on multiple ports simultaneously, providing services for different types of requests.
+    - **Conditional Caching Logic**: Special caching logic for Chinese domains, while other domains follow different caching strategies based on configuration.
+    - **Highly Configurable**: Control listening ports and resolution strategies through external configuration files, making the service flexible and easy to adjust.
+    - **Command-line Management**: Provides scripts to support command-line startup, stop, and restart of the service, making it easy to maintain and manage.
 
-### Components
+    ## Installation and Running
 
-- **Pre-routing (30003, 30004, 30006, 30007):** These are entry points for DNS queries, which decide the routing path based on the SOCKS settings.
-- **Nameservers (30003, 30004, 30006, 30007):** These handle DNS requests by communicating with specified upstream nameservers.
-- **Caches:**
-  - **General Cache:** Used for caching DNS queries to reduce response time.
-  - **cache_cn:** A specialized cache used exclusively for Chinese domain names to improve efficiency and response accuracy within China.
-- **Upstream Nameservers (e.g., 223.5.5.5, 119.29.29.29):** These are external DNS services that resolve DNS queries which are not cached.
+    ### Prerequisites
 
-## Configuration
+    - Go 1.16 or higher
+    - OpenWRT system
+    - Configured nftables and related TPROXY rules
 
-### DNS Service Settings
+    ### Configuration Files
 
-DNS settings can be adjusted through configuration files where each nameserver and its associated cache are defined. Example configuration:
+    Create `multidns.yaml` and `cn_site.list` files in the `/etc/multidns` directory.
 
-```ini
-[nameserver_30003]
-address = 223.5.5.5
-cache = cache_30003
+    #### `multidns.yaml`
 
-[nameserver_30004]
-address = 119.29.29.29
-cache = cache_30004
+    ```yaml
+    servers:
+      - id: "30003"
+        stream_split: false
+        cache_capacity: 50000
 
-[nameserver_30006]
-address = 223.5.5.5
-cache = cache_cn
+      - id: "30004"
+        stream_split: true
+        cache_capacity: 50000
 
-[nameserver_30007]
-address = 119.29.29.29
-cache = cache_30007
+      - id: "30005"
+        stream_split: true
+        cache_capacity: 50000
+
+    cache_cn:
+      capacity: 100000
+
+    upstream_cn:
+        address: ["223.5.5.5", "119.29.29.29"]
+    ```
+
+    #### `cn_site.list`
+
+    This file contains the Chinese domains that require special handling, one domain per line.
+
+    ### Build and Run
+
+    1. Clone the project code:
+
+       ```sh
+       git clone https://github.com/yourusername/multidns.git
+       cd multidns
+       ```
+
+    2. Build the project:
+
+       ```sh
+       go build -o multidns ./cmd/multidns
+       ```
+
+    3. Run the project:
+
+       ```sh
+       ./multidns
+       ```
+
+    ### Routing and Firewall Configuration
+
+    Configure routing and firewall rules on the OpenWRT system to ensure MultiDNS correctly processes and returns DNS requests and responses.
+
+    ```sh
+    ip rule add fwmark 1 table 100
+    ip route add local default dev lo table 100
+    ```
+
+    Use nftables to configure TPROXY rules:
+
+    ```sh
+    table ip xray {
+        map saddr_to_tproxy {
+            type ipv4_addr : verdict
+            flags interval
+            elements = { 192.168.3.0/24 : goto prerouting_30003, 192.168.4.0/24 : goto prerouting_30004,
+                         192.168.5.0/24 : goto prerouting_30005 }
+        }
+
+        chain prerouting {
+            type filter hook prerouting priority mangle; policy accept;
+            ip saddr vmap @saddr_to_tproxy
+        }
+
+        chain prerouting_30003 {
+            meta nftrace set 1
+            udp dport 53 tproxy to :32003 meta mark set 0x00000001 accept
+            tcp dport != 0 tproxy to :30003 meta mark set 0x00000001 accept
+            udp dport != 0 tproxy to :30003 meta mark set 0x00000001 accept
+        }
+
+        chain prerouting_30004 {
+            udp dport 53 tproxy to :32004 meta mark set 0x00000001 accept
+            tcp dport != 0 tproxy to :30004 meta mark set 0x00000001 accept
+            udp dport != 0 tproxy to :30004 meta mark set 0x00000001 accept
+        }
+
+        chain prerouting_30005 {
+            udp dport 53 tproxy to :32005 meta mark set 0x00000001 accept
+            tcp dport != 0 tproxy to :30005 meta mark set 0x00000001 accept
+            udp dport != 0 tproxy to :30005 meta mark set 0x00000001 accept
+        }
+    }
+    ```
+
+    ## Contributing
+
+    Feel free to submit issues and pull requests! Please make sure to run all tests and adhere to the project's code style before submitting code.
+
+    ## License
+
+    This project is licensed under the MIT License. See the LICENSE file for details.
+    ```
