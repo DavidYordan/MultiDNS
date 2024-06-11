@@ -1,11 +1,11 @@
-    ```
+
     # MultiDNS
 
     MultiDNS is a highly customizable DNS service developed in Go. It processes DNS query requests on multiple ports according to different configuration files and rules, and applies different caching strategies based on a specific domain list (cn_site.list). This service is particularly suitable for scenarios that require dynamically selecting the optimal resolution path based on the origin or content of the request.
 
     ## Project Structure
 
-    ```
+
     /multidns
     │
     ├── internal
@@ -30,7 +30,7 @@
     ├── .gitignore
     ├── go.mod
     └── go.sum
-    ```
+
 
     ## Features
 
@@ -53,7 +53,7 @@
 
     #### `multidns.yaml`
 
-    ```yaml
+yaml
     servers:
       - id: "30003"
         stream_split: false
@@ -72,7 +72,7 @@
 
     upstream_cn:
         address: ["223.5.5.5", "119.29.29.29"]
-    ```
+
 
     #### `cn_site.list`
 
@@ -82,35 +82,35 @@
 
     1. Clone the project code:
 
-       ```sh
+   sh
        git clone https://github.com/yourusername/multidns.git
        cd multidns
-       ```
+   
 
     2. Build the project:
 
-       ```sh
+   sh
        go build -o multidns ./cmd/multidns
-       ```
+   
 
     3. Run the project:
 
-       ```sh
+   sh
        ./multidns
-       ```
+   
 
     ### Routing and Firewall Configuration
 
     Configure routing and firewall rules on the OpenWRT system to ensure MultiDNS correctly processes and returns DNS requests and responses.
 
-    ```sh
+sh
     ip rule add fwmark 1 table 100
     ip route add local default dev lo table 100
-    ```
+
 
     Use nftables to configure TPROXY rules:
 
-    ```sh
+sh
     table ip xray {
         map saddr_to_tproxy {
             type ipv4_addr : verdict
@@ -143,7 +143,7 @@
             udp dport != 0 tproxy to :30005 meta mark set 0x00000001 accept
         }
     }
-    ```
+
 
     ## Contributing
 
@@ -152,4 +152,4 @@
     ## License
 
     This project is licensed under the MIT License. See the LICENSE file for details.
-    ```
+
