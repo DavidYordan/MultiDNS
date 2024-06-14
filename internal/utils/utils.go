@@ -3,37 +3,85 @@ package utils
 import (
 	"bufio"
 	"os"
-	"time"
-
-	"github.com/miekg/dns"
+	"strings"
 )
 
-func GetTTLFromResponse(response []byte) time.Duration {
-	var dnsMsg dns.Msg
-	if err := dnsMsg.Unpack(response); err != nil {
-		return 0
-	}
-
-	if len(dnsMsg.Answer) > 0 {
-		return time.Duration(dnsMsg.Answer[0].Header().Ttl) * time.Second
-	}
-
-	return 0
+type TrieNode struct {
+	children map[string]*TrieNode
+	isEnd    bool
 }
 
-func LoadCNDomains(filePath string) (map[string]struct{}, error) {
+func NewTrieNode() *TrieNode {
+	return &TrieNode{children: make(map[string]*TrieNode)}
+}
+
+type Trie struct {
+	root *TrieNode
+}
+
+func NewTrie() *Trie {
+	return &Trie{root: NewTrieNode()}
+}
+
+func (t *Trie) Insert(domain string) {
+	node := t.root
+	parts := strings.Split(domain, ".")
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := parts[i]
+		if part == "" {
+			continue
+		}
+		if _, exists := node.children[part]; !exists {
+			node.children[part] = NewTrieNode()
+		}
+		node = node.children[part]
+	}
+	node.isEnd = true
+}
+
+func (t *Trie) Search(domain string) bool {
+	parts := strings.Split(domain, ".")
+	for i := 0; i < len(parts); i++ {
+		subdomain := strings.Join(parts[i:], ".")
+		if t.searchExact(subdomain) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *Trie) searchExact(domain string) bool {
+	node := t.root
+	parts := strings.Split(domain, ".")
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := parts[i]
+		if part == "" {
+			continue
+		}
+		if _, exists := node.children[part]; !exists {
+			return false
+		}
+		node = node.children[part]
+		if node.isEnd {
+			return true
+		}
+	}
+	return node.isEnd
+}
+
+func LoadCNDomains(filePath string) (*Trie, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	cnDomains := make(map[string]struct{})
+	trie := NewTrie()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		domain := scanner.Text()
 		if domain != "" {
-			cnDomains[domain] = struct{}{}
+			trie.Insert(domain)
 		}
 	}
 
@@ -41,10 +89,5 @@ func LoadCNDomains(filePath string) (map[string]struct{}, error) {
 		return nil, err
 	}
 
-	return cnDomains, nil
-}
-
-func IsCNDomain(domain string, cnDomains map[string]struct{}) bool {
-	_, found := cnDomains[domain]
-	return found
+	return trie, nil
 }

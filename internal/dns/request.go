@@ -1,12 +1,13 @@
 package dns
 
 import (
-	"log"
-	"multidns/internal/utils"
+	"encoding/binary"
+	"fmt"
 	"net"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/ipv4"
 )
 
 func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []byte) {
@@ -14,101 +15,157 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 	var dnsMsg dns.Msg
 	err := dnsMsg.Unpack(msg)
 	if err != nil {
-		log.Printf("Failed to unpack DNS message: %v", err)
+		fmt.Printf("Failed to unpack DNS message: %v\n", err)
 		return
 	}
 
 	if len(dnsMsg.Question) == 0 {
-		log.Printf("Received DNS request with no questions")
+		fmt.Printf("Received DNS request with no questions\n")
 		return
 	}
 
-	question := dnsMsg.Question[0]
-	key := question.Name
-	isCN := s.Config.StreamSplit && utils.IsCNDomain(question.Name, s.CNDomains) // 判断一次，存储结果
+	var responseMsg dns.Msg
+	responseMsg.SetReply(&dnsMsg)
+	responseMsg.Compress = true
 
-	log.Printf("Received DNS request for domain: %s, isCN: %v, ID: %d", key, isCN, dnsMsg.Id)
+	var requestInfo string
 
-	var response []byte
-	cacheHit := false
-	cacheSource := ""
+	for _, question := range dnsMsg.Question {
+		key := question.Name
+		qtype := question.Qtype
 
-	if isCN {
-		if cachedResponse, found := s.CacheCN.Get(key); found {
-			response = append([]byte{}, cachedResponse...)
-			cacheHit = true
-			cacheSource = "CacheCN"
-			log.Printf("Cache hit for CN domain: %s (CacheCN)", key)
+		isCN := s.Config.StreamSplit && s.CNDomains.Search(key)
+		var response []byte
+		var remainingTTL int64
+		var source string
+		cacheKey := fmt.Sprintf("%s_%d", key, qtype)
+
+		// 直接从缓存中获取或更新
+		if isCN {
+			response, remainingTTL, source, err = s.Cache.GetOrUpdate(&dnsMsg, s.CacheName, isCN, s.UpstreamCN, s.UpstreamNonCN, s.SocksPort)
+		} else {
+			response, remainingTTL, source, err = s.Cache.GetOrUpdate(&dnsMsg, s.CacheName, isCN, s.UpstreamCN, s.UpstreamNonCN, s.SocksPort)
 		}
-	} else {
-		if cachedResponse, found := s.Cache.Get(key); found {
-			response = append([]byte{}, cachedResponse...)
-			cacheHit = true
-			cacheSource = "Cache"
-			log.Printf("Cache hit for non-CN domain: %s (Cache)", key)
-		}
-	}
 
-	if !cacheHit {
-		log.Printf("Cache miss for domain: %s, querying upstream", key)
-		response, err = s.queryUpstreamServer(&dnsMsg, isCN) // 传递isCN状态
-		duration := time.Since(start)
-		log.Printf("Upstream query duration for domain %s: %v", key, duration)
 		if err != nil {
-			log.Printf("Failed to query upstream server for domain %s: %v", key, err)
+			fmt.Printf("Failed to query upstream server for domain %s: %v\n", cacheKey, err)
 			return
 		}
 
-		ttl := utils.GetTTLFromResponse(response)
-		if isCN {
-			s.CacheCN.Set(key, response, ttl)
-			log.Printf("Setting cache for CN domain: %s, TTL: %v", key, ttl)
-		} else {
-			s.Cache.Set(key, response, ttl)
-			log.Printf("Setting cache for non-CN domain: %s, TTL: %v", key, ttl)
+		requestInfo = fmt.Sprintf("Domain: %s, Type: %d, From: %s, TTL: %d", key, qtype, source, remainingTTL)
+
+		var partialResponse dns.Msg
+		err = partialResponse.Unpack(response)
+		if err != nil {
+			fmt.Printf("Failed to unpack response for domain %s: %v\n", cacheKey, err)
+			return
 		}
+
+		responseMsg.Answer = append(responseMsg.Answer, partialResponse.Answer...)
+		responseMsg.Ns = append(responseMsg.Ns, partialResponse.Ns...)
+		responseMsg.Extra = append(responseMsg.Extra, partialResponse.Extra...)
 	}
 
-	// 确保响应的 ID 与请求的 ID 匹配
-	var responseMsg dns.Msg
-	err = responseMsg.Unpack(response)
-	if err != nil {
-		log.Printf("Failed to unpack response for domain %s: %v", key, err)
-		return
-	}
 	responseMsg.Id = dnsMsg.Id
-	response, err = responseMsg.Pack()
+	response, err := responseMsg.Pack()
 	if err != nil {
-		log.Printf("Failed to repack response for domain %s: %v", key, err)
+		fmt.Printf("Failed to repack response: %v\n", err)
 		return
 	}
 
-	// 创建新的 UDP 连接以发送响应
-	localAddr := &net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 0}
-	remoteAddr := addr.(*net.UDPAddr)
-	outConn, err := net.DialUDP("udp", localAddr, remoteAddr)
+	err = sendRawUDPResponse(addr, response)
 	if err != nil {
-		log.Printf("Failed to create UDP connection for response: %v", err)
-		return
-	}
-	defer outConn.Close()
-
-	log.Printf("Sending DNS response for domain %s to %s from local address %s", key, remoteAddr.String(), outConn.LocalAddr().String())
-
-	_, err = outConn.Write(response)
-	if err != nil {
-		log.Printf("Failed to send DNS response for domain %s to %s: %v", key, remoteAddr.String(), err)
-	} else {
-		log.Printf("Sent DNS response for domain %s (Cache: %s, ID: %d) to %s", key, cacheSource, dnsMsg.Id, remoteAddr.String())
+		fmt.Printf("Failed to send raw UDP response: %v\n", err)
 	}
 
 	durationTotal := time.Since(start)
-	log.Printf("Total processing duration for domain %s: %v", key, durationTotal)
+	fmt.Printf("%s - %v\n", requestInfo, durationTotal)
+}
 
-	// 记录返回的 IP 地址
-	for _, answer := range responseMsg.Answer {
-		if aRecord, ok := answer.(*dns.A); ok {
-			log.Printf("DNS response for domain %s contains IP: %s", key, aRecord.A.String())
-		}
+func sendRawUDPResponse(addr net.Addr, response []byte) error {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return fmt.Errorf("address is not UDPAddr")
 	}
+
+	conn, err := net.ListenPacket("ip4:udp", "0.0.0.0")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	rawConn, err := ipv4.NewRawConn(conn)
+	if err != nil {
+		return err
+	}
+
+	header := &ipv4.Header{
+		Version:  4,
+		Len:      ipv4.HeaderLen,
+		TotalLen: ipv4.HeaderLen + 8 + len(response),
+		TTL:      64,
+		Protocol: 17,
+		Src:      net.ParseIP("8.8.8.8").To4(),
+		Dst:      udpAddr.IP.To4(),
+	}
+
+	udpHeader := &UDPHeader{
+		SrcPort: 53,
+		DstPort: uint16(udpAddr.Port),
+		Length:  uint16(8 + len(response)),
+	}
+
+	udpPayload := append(udpHeader.Marshal(), response...)
+
+	checksum := udpChecksum(header, udpPayload)
+	udpHeader.Checksum = checksum
+
+	payload := append(udpHeader.Marshal(), response...)
+
+	return rawConn.WriteTo(header, payload, nil)
+}
+
+func udpChecksum(header *ipv4.Header, payload []byte) uint16 {
+	pseudoHeader := pseudoHeader(header.Src, header.Dst, 17, len(payload))
+	checksum := calculateChecksum(append(pseudoHeader, payload...))
+	return checksum
+}
+
+func pseudoHeader(src, dst net.IP, protocol, length int) []byte {
+	return []byte{
+		src[0], src[1], src[2], src[3],
+		dst[0], dst[1], dst[2], dst[3],
+		0,
+		byte(protocol),
+		byte(length >> 8), byte(length),
+	}
+}
+
+func calculateChecksum(data []byte) uint16 {
+	sum := 0
+	for i := 0; i < len(data)-1; i += 2 {
+		sum += int(data[i])<<8 | int(data[i+1])
+	}
+	if len(data)%2 == 1 {
+		sum += int(data[len(data)-1]) << 8
+	}
+	sum = (sum >> 16) + (sum & 0xffff)
+	sum += sum >> 16
+	return uint16(^sum)
+}
+
+type UDPHeader struct {
+	SrcPort  uint16
+	DstPort  uint16
+	Length   uint16
+	Checksum uint16
+}
+
+func (h *UDPHeader) Marshal() []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint16(b[0:2], h.SrcPort)
+	binary.BigEndian.PutUint16(b[2:4], h.DstPort)
+	binary.BigEndian.PutUint16(b[4:6], h.Length)
+	binary.BigEndian.PutUint16(b[6:8], h.Checksum)
+	return b
 }

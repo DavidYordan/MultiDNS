@@ -1,69 +1,57 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"sync"
+
 	"multidns/internal/config"
 	"multidns/internal/dns"
 	"multidns/internal/utils"
 	"multidns/pkg/cache"
-	"os"
-	"strconv"
-	"sync"
 )
 
 func main() {
-	logDir := "/var/log/multidns"
-	if _, err := os.Stat(logDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
-			log.Fatalf("Failed to create logs directory: %v", err)
-		}
-	}
+	fmt.Println("Starting multidns service...")
 
-	logFile, err := os.OpenFile(logDir+"/multidns.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	// 加载配置
+	cfg, err := config.GetConfig()
 	if err != nil {
-		log.Fatalf("Failed to open log file: %v", err)
+		fmt.Printf("Failed to load configuration: %v\n", err)
+		return
 	}
-	defer logFile.Close()
 
-	log.SetOutput(logFile)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	fmt.Printf("Configuration loaded: %+v\n", cfg)
 
-	log.Println("Starting multidns service...")
-
-	cfg, err := config.LoadConfig("/etc/multidns/multidns.yaml")
+	// 加载 CN 域名列表
+	cnDomains, err := utils.LoadCNDomains(cfg.CnDomainFile)
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		fmt.Printf("Failed to load CN domains: %v\n", err)
+		return
 	}
+	fmt.Println("CN domains loaded successfully")
 
-	log.Printf("Configuration loaded: %+v", cfg)
-
-	// 加载 cn_site.list 文件
-	cnDomains, err := utils.LoadCNDomains("/etc/multidns/cn_site.list")
+	// 创建共享缓存
+	sharedCache, err := cache.NewDNSCache(int64(cfg.Capacity)<<20, "shared_cache") // Convert MB to bytes
 	if err != nil {
-		log.Fatalf("Failed to load CN domains: %v", err)
+		fmt.Printf("Failed to create shared cache: %v\n", err)
+		return
 	}
-	log.Println("CN domains loaded successfully")
-
-	cacheCN := cache.NewDNSCache(cfg.CacheCN.Capacity)
 
 	var wg sync.WaitGroup
-	for _, serverCfg := range cfg.Servers {
-		port, err := strconv.Atoi(serverCfg.ID)
-		if err != nil {
-			log.Fatalf("Invalid server ID: %v", err)
-		}
-		socksPort := port + 1000
-		listenPort := port + 2000
 
-		dnsServer := dns.NewDNSServer(serverCfg, cacheCN, cfg.UpstreamCN.Address, socksPort, cnDomains)
+	// 启动各个 DNS 服务器实例
+	for _, serverCfg := range cfg.Servers {
+		listenPort := 32000 + serverCfg.Segment
+		cacheName := fmt.Sprintf("cache_%d", listenPort)
+		socksPort := 31000 + serverCfg.Segment
+
+		dnsServer := dns.NewDNSServer(serverCfg, sharedCache, cfg.UpstreamCN.Address, cfg.UpstreamNonCN.Address, cnDomains, cacheName, socksPort)
 		wg.Add(1)
-		go func() {
+		go func(port int) {
 			defer wg.Done()
-			dnsServer.StartTransparentUDP(listenPort)
-		}()
+			dnsServer.StartTransparentUDP(port)
+		}(listenPort)
 	}
 
 	wg.Wait()
-
-	log.Println("Service started successfully")
 }

@@ -1,42 +1,51 @@
 package config
 
 import (
-	"io/ioutil"
-	"log"
+	"fmt"
+	"os"
+	"sync"
 
 	"gopkg.in/yaml.v2"
 )
 
 type ServerConfig struct {
-	ID            string `yaml:"id"`
-	StreamSplit   bool   `yaml:"stream_split"`
-	CacheCapacity int    `yaml:"cache_capacity"`
+	Segment     int  `yaml:"segment"`
+	StreamSplit bool `yaml:"stream_split"`
 }
 
 type Config struct {
-	Servers []ServerConfig `yaml:"servers"`
-	CacheCN struct {
-		Capacity int `yaml:"capacity"`
-	} `yaml:"cache_cn"`
+	Servers    []ServerConfig `yaml:"servers"`
+	Capacity   int            `yaml:"capacity"`
 	UpstreamCN struct {
 		Address []string `yaml:"address"`
 	} `yaml:"upstream_cn"`
+	UpstreamNonCN struct {
+		Address []string `yaml:"address"`
+	} `yaml:"upstream_non_cn"`
+	CnDomainFile string `yaml:"cn_domain_file"`
 }
 
-func LoadConfig(configPath string) (*Config, error) {
-	log.Printf("Loading configuration from %s", configPath)
-	data, err := ioutil.ReadFile(configPath)
-	if err != nil {
-		log.Fatalf("Failed to read configuration file: %v", err)
-		return nil, err
-	}
-	var config Config
-	log.Println("Unmarshaling configuration")
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		log.Fatalf("Failed to unmarshal configuration: %v", err)
-		return nil, err
-	}
-	log.Println("Configuration loaded successfully")
-	return &config, nil
+var (
+	cfg  *Config
+	once sync.Once
+)
+
+func GetConfig() (*Config, error) {
+	var err error
+	once.Do(func() {
+		fmt.Println("Loading configuration from /etc/multidns/multidns.yaml")
+		data, err := os.ReadFile("/etc/multidns/multidns.yaml")
+		if err != nil {
+			fmt.Printf("Failed to read configuration file: %v\n", err)
+			return
+		}
+		fmt.Println("Unmarshaling configuration")
+		err = yaml.Unmarshal(data, &cfg)
+		if err != nil {
+			fmt.Printf("Failed to unmarshal configuration: %v\n", err)
+			return
+		}
+		fmt.Println("Configuration loaded successfully")
+	})
+	return cfg, err
 }

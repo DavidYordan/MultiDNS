@@ -1,6 +1,6 @@
 # MultiDNS
 
-MultiDNS is a highly customizable DNS service developed in Go. It processes DNS query requests on multiple ports according to different configuration files and rules, and applies different caching strategies based on a specific domain list (cn_site.list). This service is particularly suitable for scenarios that require dynamically selecting the optimal resolution path based on the origin or content of the request.
+MultiDNS is a DNS split-routing project for OpenWrt, implemented in Go. It routes DNS requests from different LAN segments to corresponding ports and handles DNS resolution based on specified configurations.
 
 ## Project Structure
 
@@ -14,13 +14,14 @@ MultiDNS is a highly customizable DNS service developed in Go. It processes DNS 
 │   │   ├── server.go       # DNS server startup logic
 │   │   ├── request.go      # Request handling logic
 │   │   ├── socket.go       # Socket creation logic
+│   ├── upstream
 │   │   └── upstream.go     # Upstream DNS query logic
 │   └── utils
 │       └── utils.go        # Utility functions
 │
 ├── pkg
 │   ├── cache
-│   │   └── cache.go        # Cache handling logic
+│   │   └── dns_cache.go    # Cache handling logic
 │
 ├── cmd
 │   └── multidns
@@ -31,119 +32,69 @@ MultiDNS is a highly customizable DNS service developed in Go. It processes DNS 
 └── go.sum
 ```
 
-## Features
+## Configuration
 
-- **Multi-port Listening**: Capable of listening for DNS queries on multiple ports simultaneously, providing services for different types of requests.
-- **Conditional Caching Logic**: Special caching logic for Chinese domains, while other domains follow different caching strategies based on configuration.
-- **Highly Configurable**: Control listening ports and resolution strategies through external configuration files, making the service flexible and easy to adjust.
-- **Command-line Management**: Provides scripts to support command-line startup, stop, and restart of the service, making it easy to maintain and manage.
-
-## Installation and Running
-
-### Prerequisites
-
-- Go 1.16 or higher
-- OpenWRT system
-- Configured nftables and related TPROXY rules
-
-### Configuration Files
-
-Create `multidns.yaml` and `cn_site.list` files in the `/etc/multidns` directory.
-
-#### `multidns.yaml`
+The configuration file (`multidns.yaml`) is structured as follows:
 
 ```yaml
 servers:
-  - id: "30003"
+  - segment: 3
     stream_split: false
-    cache_capacity: 50000
 
-  - id: "30004"
+  - segment: 4
     stream_split: true
-    cache_capacity: 50000
 
-  - id: "30005"
+  - segment: 5
     stream_split: true
-    cache_capacity: 50000
 
-cache_cn:
-  capacity: 100000
+capacity: 1024
 
 upstream_cn:
     address: ["223.5.5.5", "119.29.29.29"]
+
+upstream_non_cn:
+    address: ["1.1.1.1", "8.8.8.8"]
+
+cn_domain_file: "/etc/multidns/cn_site.list"
 ```
 
-#### `cn_site.list`
+### Fields
 
-This file contains the Chinese domains that require special handling, one domain per line.
+- `servers`: List of server configurations, each with a segment and a stream split option.
+- `capacity`: The maximum capacity of the DNS cache in MB.
+- `upstream_cn`: List of upstream DNS servers for CN domains.
+- `upstream_non_cn`: List of upstream DNS servers for non-CN domains.
+- `cn_domain_file`: Path to the file containing the list of CN domains.
 
-### Build and Run
+## Usage
 
-1. Clone the project code:
-   ```sh
-   git clone https://github.com/yourusername/multidns.git
-   cd multidns
-   ```
+### Building the Project
 
-2. Build the project:
-   ```sh
-   go build -o multidns ./cmd/multidns
-   ```
-
-3. Run the project:
-   ```sh
-   ./multidns
-   ```
-
-### Routing and Firewall Configuration
-
-Configure routing and firewall rules on the OpenWRT system to ensure MultiDNS correctly processes and returns DNS requests and responses.
+To build the project, run:
 
 ```sh
-ip rule add fwmark 1 table 100
-ip route add local default dev lo table 100
+go build -o multidns ./cmd/multidns
 ```
 
-Use nftables to configure TPROXY rules:
+### Running the Server
+
+To start the server, execute the built binary:
 
 ```sh
-table ip xray {
-    map saddr_to_tproxy {
-        type ipv4_addr : verdict
-        flags interval
-        elements = { 192.168.3.0/24 : goto prerouting_30003, 192.168.4.0/24 : goto prerouting_30004,
-                     192.168.5.0/24 : goto prerouting_30005 }
-    }
-
-    chain prerouting {
-        type filter hook prerouting priority mangle; policy accept;
-        ip saddr vmap @saddr_to_tproxy
-    }
-
-    chain prerouting_30003 {
-        meta nftrace set 1
-        udp dport 53 tproxy to :32003 meta mark set 0x00000001 accept
-        tcp dport != 0 tproxy to :30003 meta mark set 0x00000001 accept
-        udp dport != 0 tproxy to :30003 meta mark set 0x00000001 accept
-    }
-
-    chain prerouting_30004 {
-        udp dport 53 tproxy to :32004 meta mark set 0x00000001 accept
-        tcp dport != 0 tproxy to :30004 meta mark set 0x00000001 accept
-        udp dport != 0 tproxy to :30004 meta mark set 0x00000001 accept
-    }
-
-    chain prerouting_30005 {
-        udp dport 53 tproxy to :32005 meta mark set 0x00000001 accept
-        tcp dport != 0 tproxy to :30005 meta mark set 0x00000001 accept
-        udp dport != 0 tproxy to :30005 meta mark set 0x00000001 accept
-    }
-}
+./multidns
 ```
+
+Make sure the `multidns.yaml` configuration file is in the correct path (`/etc/multidns/multidns.yaml`).
+
+## Functionality
+
+1. **DNS Request Handling**: Routes DNS requests from different LAN segments to corresponding ports using nftables rules.
+2. **Cache Management**: Utilizes a DNS cache to store responses and reduce latency for repeated queries.
+3. **Upstream Query**: Resolves DNS queries using specified upstream DNS servers based on domain matching.
 
 ## Contributing
 
-Feel free to submit issues and pull requests! Please make sure to run all tests and adhere to the project's code style before submitting code.
+Feel free to contribute to the project by submitting issues or pull requests.
 
 ## License
 
