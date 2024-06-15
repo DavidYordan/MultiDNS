@@ -20,18 +20,21 @@ jobs:
 
     - name: Get dependencies
       run: go mod tidy
+      working-directory: ./cmd/multidns
 
     - name: Build
       run: go build -o multidns
+      working-directory: ./cmd/multidns
 
     - name: Archive build
       run: tar -czf multidns.tar.gz multidns
+      working-directory: ./cmd/multidns
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v2
       with:
         name: multidns
-        path: multidns.tar.gz
+        path: ./cmd/multidns/multidns.tar.gz
 
   release:
     needs: build
@@ -63,6 +66,4 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./multidns.tar.gz
-        asset_name: multidns.tar.gz
-        asset_content_type: application/gzip
+        asset_path: ./cmd/mul
