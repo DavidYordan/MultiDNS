@@ -1,12 +1,9 @@
-name: Go Build
+name: Build and Release
 
 on:
   push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+    tags:
+      - 'v*.*.*' # 仅当推送的标签匹配版本模式时触发
 
 jobs:
   build:
@@ -25,7 +22,47 @@ jobs:
       run: go mod tidy
 
     - name: Build
-      run: go build -v ./...
+      run: go build -o multidns
 
-    - name: Run tests
-      run: go test -v ./...
+    - name: Archive build
+      run: tar -czf multidns.tar.gz multidns
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: multidns
+        path: multidns.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Download build artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: multidns
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./multidns.tar.gz
+        asset_name: multidns.tar.gz
+        asset_content_type: application/gzip
