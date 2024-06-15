@@ -5,10 +5,12 @@ on:
     tags:
       - '*'
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+permissions:
+  contents: write
 
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
       uses: actions/checkout@v2
@@ -30,25 +32,6 @@ jobs:
       run: tar -czf multidns.tar.gz multidns
       working-directory: ./cmd/multidns
 
-    - name: Upload build artifact
-      uses: actions/upload-artifact@v2
-      with:
-        name: multidns
-        path: ./cmd/multidns/multidns.tar.gz
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
-
-    - name: Download build artifact
-      uses: actions/download-artifact@v2
-      with:
-        name: multidns
-
     - name: Create GitHub Release
       id: create_release
       uses: actions/create-release@v1
@@ -66,4 +49,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./cmd/mul
+        asset_path: ./cmd/multidns/multidns.tar.gz
+        asset_name: multidns.tar.gz
+        asset_content_type: application/gzip
