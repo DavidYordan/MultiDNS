@@ -3,7 +3,7 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*.*.*' # 仅当推送的标签匹配版本模式时触发
+      - '*'
 
 jobs:
   build:
