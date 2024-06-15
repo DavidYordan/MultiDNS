@@ -1,41 +1,38 @@
 package upstream
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/proxy"
 )
 
 // QueryUpstreamServer queries the upstream DNS servers
-func QueryUpstreamServer(dnsMsg *dns.Msg, isCN bool, upstreamCN, upstreamNonCN []string, socksPort int) ([]byte, string, error) {
+func QueryUpstreamServer(dnsMsg *dns.Msg, isCN bool, upstreamCN, upstreamNonCN []string, socksDialer proxy.Dialer, SocksPort int) ([]byte, string, error) {
 	upstreamServers := upstreamNonCN
 	if isCN {
 		upstreamServers = upstreamCN
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	resultChan := make(chan struct {
 		response []byte
 		server   string
 		err      error
-	}, len(upstreamServers)*3+len(upstreamServers))
+	}, len(upstreamServers)*3)
 	var wg sync.WaitGroup
 
 	for _, upstreamAddr := range upstreamServers {
 		wg.Add(1)
-		go queryAllMethods(dnsMsg, upstreamAddr, resultChan, &wg)
-	}
-
-	if !isCN {
-		for _, upstreamAddr := range upstreamServers {
-			wg.Add(1)
-			go querySocks5UDP(dnsMsg, socksPort, upstreamAddr, resultChan, &wg)
-		}
+		go queryAllMethods(ctx, dnsMsg, upstreamAddr, resultChan, &wg, isCN, socksDialer, SocksPort)
 	}
 
 	go func() {
@@ -45,227 +42,196 @@ func QueryUpstreamServer(dnsMsg *dns.Msg, isCN bool, upstreamCN, upstreamNonCN [
 
 	for res := range resultChan {
 		if res.err == nil {
+			cancel() // Cancel other goroutines
 			return res.response, res.server, nil
+		} else {
+			fmt.Printf("Failed to query upstream server %s: %v\n", res.server, res.err)
 		}
 	}
 
 	return nil, "", fmt.Errorf("failed to get a response from any upstream servers")
 }
 
-func queryAllMethods(dnsMsg *dns.Msg, upstreamAddr string, resultChan chan struct {
+func queryAllMethods(ctx context.Context, dnsMsg *dns.Msg, upstreamAddr string, resultChan chan struct {
 	response []byte
 	server   string
 	err      error
-}, wg *sync.WaitGroup) {
+}, wg *sync.WaitGroup, isCN bool, socksDialer proxy.Dialer, SocksPort int) {
 	defer wg.Done()
-	if response, err := queryDirectUDP(dnsMsg, upstreamAddr); err == nil {
-		resultChan <- struct {
+
+	if response, server, err := queryUDP(ctx, dnsMsg, upstreamAddr, isCN, socksDialer, SocksPort); err == nil {
+		select {
+		case resultChan <- struct {
 			response []byte
 			server   string
 			err      error
-		}{response: response, server: "UDP " + upstreamAddr, err: nil}
+		}{response: response, server: server, err: nil}:
+		case <-ctx.Done():
+		}
 		return
+	} else {
 	}
 
-	if response, err := queryDirectTCP(dnsMsg, upstreamAddr); err == nil {
-		resultChan <- struct {
+	if response, server, err := queryTCP(ctx, dnsMsg, upstreamAddr, isCN, socksDialer, SocksPort); err == nil {
+		select {
+		case resultChan <- struct {
 			response []byte
 			server   string
 			err      error
-		}{response: response, server: "TCP " + upstreamAddr, err: nil}
+		}{response: response, server: server, err: nil}:
+		case <-ctx.Done():
+		}
 		return
+	} else {
 	}
 
-	if response, err := queryDirectTLS(dnsMsg, upstreamAddr); err == nil {
-		resultChan <- struct {
+	if response, server, err := queryTLS(ctx, dnsMsg, upstreamAddr, isCN, socksDialer, SocksPort); err == nil {
+		select {
+		case resultChan <- struct {
 			response []byte
 			server   string
 			err      error
-		}{response: response, server: "TLS " + upstreamAddr, err: nil}
+		}{response: response, server: server, err: nil}:
+		case <-ctx.Done():
+		}
 		return
+	} else {
 	}
 }
 
-func querySocks5UDP(dnsMsg *dns.Msg, socksPort int, upstreamAddr string, resultChan chan struct {
-	response []byte
-	server   string
-	err      error
-}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	response, err := queryThroughSocks5UDP(dnsMsg, socksPort, upstreamAddr)
-	if err == nil {
-		resultChan <- struct {
-			response []byte
-			server   string
-			err      error
-		}{response: response, server: fmt.Sprintf("SOCKS5 127.0.0.1:%d to %s", socksPort, upstreamAddr), err: nil}
-	}
-}
-
-func queryDirectUDP(dnsMsg *dns.Msg, upstreamAddr string) ([]byte, error) {
+func queryUDP(ctx context.Context, dnsMsg *dns.Msg, upstreamAddr string, isCN bool, socksDialer proxy.Dialer, SocksPort int) ([]byte, string, error) {
 	address := upstreamAddr + ":53"
-	conn, err := net.Dial("udp", address)
+	var conn net.Conn
+	var err error
+
+	if isCN {
+		conn, err = net.Dial("udp", address)
+	} else {
+		conn, err = socksDialer.Dial("udp", address)
+	}
+
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer conn.Close()
 
 	msg, err := dnsMsg.Pack()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	_, err = conn.Write(msg)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	response := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := conn.Read(response)
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	default:
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Read(response)
+		if err != nil {
+			return nil, "", err
+		}
+		server := fmt.Sprintf("UDP %s", address)
+		if !isCN {
+			server = fmt.Sprintf("SOCKS5_%d UDP %s", SocksPort, address)
+		}
+		return response[:n], server, nil
 	}
-
-	return response[:n], nil
 }
 
-func queryDirectTCP(dnsMsg *dns.Msg, upstreamAddr string) ([]byte, error) {
+func queryTCP(ctx context.Context, dnsMsg *dns.Msg, upstreamAddr string, isCN bool, socksDialer proxy.Dialer, SocksPort int) ([]byte, string, error) {
 	address := upstreamAddr + ":53"
-	conn, err := net.Dial("tcp", address)
+	var conn net.Conn
+	var err error
+
+	if isCN {
+		conn, err = net.Dial("tcp", address)
+	} else {
+		conn, err = socksDialer.Dial("tcp", address)
+	}
+
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer conn.Close()
 
 	msg, err := dnsMsg.Pack()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	length := make([]byte, 2)
 	binary.BigEndian.PutUint16(length, uint16(len(msg)))
 	_, err = conn.Write(append(length, msg...))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	response := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := conn.Read(response)
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	default:
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Read(response)
+		if err != nil {
+			return nil, "", err
+		}
+		server := fmt.Sprintf("TCP %s", address)
+		if !isCN {
+			server = fmt.Sprintf("SOCKS5_%d TCP %s", SocksPort, address)
+		}
+		return response[2:n], server, nil
 	}
-
-	return response[2:n], nil
 }
 
-func queryDirectTLS(dnsMsg *dns.Msg, upstreamAddr string) ([]byte, error) {
+func queryTLS(ctx context.Context, dnsMsg *dns.Msg, upstreamAddr string, isCN bool, socksDialer proxy.Dialer, SocksPort int) ([]byte, string, error) {
 	address := upstreamAddr + ":853"
-	conn, err := tls.Dial("tcp", address, &tls.Config{
-		InsecureSkipVerify: true,
-	})
+	var conn net.Conn
+	var err error
+
+	if isCN {
+		conn, err = tls.Dial("tcp", address, &tls.Config{
+			InsecureSkipVerify: true,
+		})
+	} else {
+		conn, err = socksDialer.Dial("tcp", address)
+	}
+
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer conn.Close()
 
 	msg, err := dnsMsg.Pack()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	length := make([]byte, 2)
 	binary.BigEndian.PutUint16(length, uint16(len(msg)))
 	_, err = conn.Write(append(length, msg...))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	response := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := conn.Read(response)
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	default:
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Read(response)
+		if err != nil {
+			return nil, "", err
+		}
+		server := fmt.Sprintf("TLS %s", address)
+		if !isCN {
+			server = fmt.Sprintf("SOCKS5_%d TLS %s", SocksPort, address)
+		}
+		return response[2:n], server, nil
 	}
-
-	return response[2:n], nil
-}
-
-func queryThroughSocks5UDP(dnsMsg *dns.Msg, socksPort int, upstreamAddr string) ([]byte, error) {
-	socksAddr := "127.0.0.1:" + strconv.Itoa(socksPort)
-	tcpConn, err := net.Dial("tcp", socksAddr)
-	if err != nil {
-		return nil, err
-	}
-	defer tcpConn.Close()
-
-	if _, err := tcpConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		return nil, err
-	}
-	resp := make([]byte, 2)
-	if _, err := tcpConn.Read(resp); err != nil {
-		return nil, err
-	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
-		return nil, fmt.Errorf("SOCKS5 handshake failed for %s", socksAddr)
-	}
-
-	udpRequest := []byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-	if _, err := tcpConn.Write(udpRequest); err != nil {
-		return nil, err
-	}
-	resp = make([]byte, 10)
-	if _, err := tcpConn.Read(resp); err != nil {
-		return nil, err
-	}
-	if resp[1] != 0x00 {
-		return nil, fmt.Errorf("SOCKS5 UDP Associate failed for %s", socksAddr)
-	}
-
-	udpAddr := &net.UDPAddr{
-		IP:   net.IP(resp[4:8]),
-		Port: int(binary.BigEndian.Uint16(resp[8:10])),
-	}
-	udpConn, err := net.DialUDP("udp", nil, udpAddr)
-	if err != nil {
-		return nil, err
-	}
-	defer udpConn.Close()
-
-	msg, err := dnsMsg.Pack()
-	if err != nil {
-		return nil, err
-	}
-
-	socks5UDPRequest := buildSocks5UDPRequest(msg, upstreamAddr, 53)
-	_, err = udpConn.Write(socks5UDPRequest)
-	if err != nil {
-		return nil, err
-	}
-
-	response := make([]byte, 4096)
-	udpConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := udpConn.Read(response)
-	if err != nil {
-		return nil, err
-	}
-
-	return removeSocks5UDPHeader(response[:n])
-}
-
-func buildSocks5UDPRequest(data []byte, destAddr string, destPort int) []byte {
-	destIP := net.ParseIP(destAddr).To4()
-	portBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBytes, uint16(destPort))
-
-	header := append([]byte{0x00, 0x00, 0x00, 0x01}, destIP...)
-	header = append(header, portBytes...)
-	return append(header, data...)
-}
-
-func removeSocks5UDPHeader(data []byte) ([]byte, error) {
-	if len(data) < 10 {
-		return nil, fmt.Errorf("invalid SOCKS5 UDP response")
-	}
-	return data[10:], nil
 }

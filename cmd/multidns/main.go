@@ -47,10 +47,10 @@ func main() {
 
 		dnsServer := dns.NewDNSServer(serverCfg, sharedCache, cfg.UpstreamCN.Address, cfg.UpstreamNonCN.Address, cnDomains, cacheName, socksPort)
 		wg.Add(1)
-		go func(port int) {
+		go func() {
 			defer wg.Done()
-			dnsServer.StartTransparentUDP(port)
-		}(listenPort)
+			dnsServer.StartTransparentUDP(listenPort)
+		}()
 	}
 
 	wg.Wait()

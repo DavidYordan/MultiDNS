@@ -40,12 +40,7 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 		var source string
 		cacheKey := fmt.Sprintf("%s_%d", key, qtype)
 
-		// 直接从缓存中获取或更新
-		if isCN {
-			response, remainingTTL, source, err = s.Cache.GetOrUpdate(&dnsMsg, s.CacheName, isCN, s.UpstreamCN, s.UpstreamNonCN, s.SocksPort)
-		} else {
-			response, remainingTTL, source, err = s.Cache.GetOrUpdate(&dnsMsg, s.CacheName, isCN, s.UpstreamCN, s.UpstreamNonCN, s.SocksPort)
-		}
+		response, remainingTTL, source, err = s.Cache.GetOrUpdate(&dnsMsg, s.CacheName, isCN, s.UpstreamCN, s.UpstreamNonCN, s.socksDialer, s.SocksPort)
 
 		if err != nil {
 			fmt.Printf("Failed to query upstream server for domain %s: %v\n", cacheKey, err)
@@ -59,6 +54,16 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 		if err != nil {
 			fmt.Printf("Failed to unpack response for domain %s: %v\n", cacheKey, err)
 			return
+		}
+
+		for i := range partialResponse.Answer {
+			partialResponse.Answer[i].Header().Ttl = uint32(remainingTTL)
+		}
+		for i := range partialResponse.Ns {
+			partialResponse.Ns[i].Header().Ttl = uint32(remainingTTL)
+		}
+		for i := range partialResponse.Extra {
+			partialResponse.Extra[i].Header().Ttl = uint32(remainingTTL)
 		}
 
 		responseMsg.Answer = append(responseMsg.Answer, partialResponse.Answer...)

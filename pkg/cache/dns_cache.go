@@ -9,6 +9,7 @@ import (
 
 	"github.com/dgraph-io/ristretto"
 	"github.com/miekg/dns"
+	"golang.org/x/net/proxy"
 )
 
 // DNSCache represents the DNS cache using ristretto
@@ -29,7 +30,7 @@ func NewDNSCache(maxCost int64, cacheName string) (*DNSCache, error) {
 		NumCounters: 1e7,     // number of keys to track frequency of (10M).
 		MaxCost:     maxCost, // maximum cost of cache.
 		BufferItems: 64,      // number of keys per Get buffer.
-		Metrics:     true,    // enable metrics collection.
+		Metrics:     false,   // disable metrics collection.
 	})
 	if err != nil {
 		return nil, err
@@ -47,15 +48,14 @@ func (c *DNSCache) Get(cacheName, qtype, domain string) ([]byte, bool, int64) {
 	key := c.generateKey(cacheName, qtype, domain)
 	if value, found := c.cache.Get(key); found {
 		entry := value.(CacheEntry)
-		expired := time.Now().Unix() > entry.Expiry
+		expired := false
 		remainingTTL := entry.Expiry - time.Now().Unix()
 		if remainingTTL < 0 {
-			remainingTTL = 1 // If expired, set TTL to 1 to indicate it's stale
+			remainingTTL = 0
+			expired = true
 		}
-		c.printMetrics()
 		return entry.Response, expired, remainingTTL
 	}
-	c.printMetrics()
 	return nil, false, 0
 }
 
@@ -72,7 +72,7 @@ func (c *DNSCache) Set(cacheName, qtype, domain string, response []byte, ttl int
 
 // GetOrUpdate retrieves a DNS response from the cache for the specified domain name and type
 // If the response is not found or expired, it queries the upstream server and updates the cache
-func (c *DNSCache) GetOrUpdate(dnsMsg *dns.Msg, cacheName string, isCN bool, upstreamCN, upstreamNonCN []string, socksPort int) ([]byte, int64, string, error) {
+func (c *DNSCache) GetOrUpdate(dnsMsg *dns.Msg, cacheName string, isCN bool, upstreamCN, upstreamNonCN []string, socksDialer proxy.Dialer, SocksPort int) ([]byte, int64, string, error) {
 	domain := dnsMsg.Question[0].Name
 	qtype := dns.TypeToString[dnsMsg.Question[0].Qtype]
 	response, expired, remainingTTL := c.Get(cacheName, qtype, domain)
@@ -83,16 +83,16 @@ func (c *DNSCache) GetOrUpdate(dnsMsg *dns.Msg, cacheName string, isCN bool, ups
 	if response != nil && expired {
 		// 已过期的数据立即返回，同时异步更新缓存
 		go func() {
-			newResponse, _, err := c.updateCache(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksPort)
+			newResponse, _, err := c.updateCache(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksDialer, SocksPort)
 			if err == nil {
 				c.Set(cacheName, qtype, domain, newResponse, GetTTLFromResponse(newResponse))
 			}
 		}()
-		return response, 1, cacheName, nil
+		return response, remainingTTL, fmt.Sprintf("%s_expired", cacheName), nil
 	}
 
 	// 没有找到数据，查询上游并更新缓存
-	response, newServer, err := c.updateCache(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksPort)
+	response, newServer, err := c.updateCache(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksDialer, SocksPort)
 	if err != nil {
 		return nil, 0, "", err
 	}
@@ -101,8 +101,8 @@ func (c *DNSCache) GetOrUpdate(dnsMsg *dns.Msg, cacheName string, isCN bool, ups
 	return response, ttl, newServer, nil
 }
 
-func (c *DNSCache) updateCache(dnsMsg *dns.Msg, isCN bool, upstreamCN, upstreamNonCN []string, socksPort int) ([]byte, string, error) {
-	response, server, err := upstream.QueryUpstreamServer(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksPort)
+func (c *DNSCache) updateCache(dnsMsg *dns.Msg, isCN bool, upstreamCN, upstreamNonCN []string, socksDialer proxy.Dialer, SocksPort int) ([]byte, string, error) {
+	response, server, err := upstream.QueryUpstreamServer(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksDialer, SocksPort)
 	if err != nil {
 		return nil, "", err
 	}
@@ -141,16 +141,4 @@ func GetTTLFromResponse(response []byte) int64 {
 	}
 
 	return 0
-}
-
-// printMetrics prints the metrics collected by Ristretto
-func (c *DNSCache) printMetrics() {
-	metrics := c.Metrics()
-	fmt.Printf("Metrics - Hits: %d, Misses: %d, Hit Ratio: %.2f, Cost Added: %d, Cost Evicted: %d\n",
-		metrics.Hits(),
-		metrics.Misses(),
-		metrics.Ratio(),
-		metrics.CostAdded(),
-		metrics.CostEvicted(),
-	)
 }
