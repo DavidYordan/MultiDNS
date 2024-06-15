@@ -84,8 +84,12 @@ func (c *DNSCache) GetOrUpdate(dnsMsg *dns.Msg, cacheName string, isCN bool, ups
 		// 已过期的数据立即返回，同时异步更新缓存
 		go func() {
 			newResponse, _, err := c.updateCache(dnsMsg, isCN, upstreamCN, upstreamNonCN, socksDialer, SocksPort)
-			if err == nil {
-				c.Set(cacheName, qtype, domain, newResponse, GetTTLFromResponse(newResponse))
+			if err != nil {
+				return
+			}
+			ttl := GetTTLFromResponse(newResponse)
+			if ttl > 0 {
+				c.Set(cacheName, qtype, domain, newResponse, ttl)
 			}
 		}()
 		return response, remainingTTL, fmt.Sprintf("%s_expired", cacheName), nil
@@ -97,7 +101,9 @@ func (c *DNSCache) GetOrUpdate(dnsMsg *dns.Msg, cacheName string, isCN bool, ups
 		return nil, 0, "", err
 	}
 	ttl := GetTTLFromResponse(response)
-	c.Set(cacheName, qtype, domain, response, ttl)
+	if ttl > 0 {
+		c.Set(cacheName, qtype, domain, response, ttl)
+	}
 	return response, ttl, newServer, nil
 }
 
