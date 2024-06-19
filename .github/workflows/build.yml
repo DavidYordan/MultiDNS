@@ -22,15 +22,12 @@ jobs:
 
     - name: Get dependencies
       run: go mod tidy
-      working-directory: ./cmd/multidns
 
     - name: Build
       run: go build -o multidns
-      working-directory: ./cmd/multidns
 
     - name: Archive build
       run: tar -czf multidns.tar.gz multidns
-      working-directory: ./cmd/multidns
 
     - name: Create GitHub Release
       id: create_release
@@ -49,6 +46,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./cmd/multidns/multidns.tar.gz
+        asset_path: multidns.tar.gz
         asset_name: multidns.tar.gz
         asset_content_type: application/gzip
