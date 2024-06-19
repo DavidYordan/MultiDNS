@@ -45,7 +45,11 @@ func QueryUpstreamServer(s *DNSServer, dnsMsg *dns.Msg, isCN bool) ([]byte, stri
 	for res := range resultChan {
 		if res.err == nil {
 			cancel()
-			return res.response, fmt.Sprintf("%d_%s", s.SocksPort, res.server), nil
+			if isCN {
+				return res.response, fmt.Sprintf("%s", res.server), nil
+			} else {
+				return res.response, fmt.Sprintf("%s_%d", res.server, s.SocksPort), nil
+			}
 		}
 	}
 
