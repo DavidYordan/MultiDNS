@@ -2,7 +2,6 @@ package internal
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"time"
@@ -16,7 +15,7 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 	var dnsMsg dns.Msg
 	err := dnsMsg.Unpack(msg)
 	if err != nil {
-		fmt.Printf("Failed to unpack DNS message: %v\n%s\n", err, hex.Dump(msg))
+		fmt.Printf("Failed to unpack DNS message: %v\n", err)
 		return
 	}
 
