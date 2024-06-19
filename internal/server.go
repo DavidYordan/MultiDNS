@@ -1,29 +1,25 @@
-package dns
+package internal
 
 import (
 	"fmt"
-	"multidns/internal/config"
-	"multidns/internal/utils"
-	"multidns/pkg/cache"
 	"net"
-	"strconv"
 	"sync"
 
-	"golang.org/x/net/proxy"
+	"github.com/txthinking/socks5"
 )
 
 type DNSServer struct {
-	Config        config.ServerConfig
-	Cache         *cache.DNSCache
+	Config        ServerConfig
+	Cache         *DNSCache
 	UpstreamCN    []string
 	UpstreamNonCN []string
-	CNDomains     *utils.Trie
+	CNDomains     *Trie
 	CacheName     string
 	SocksPort     int
-	socksDialer   proxy.Dialer
+	socksDialer   *socks5.Client
 }
 
-func NewDNSServer(cfg config.ServerConfig, cache *cache.DNSCache, upstreamCN []string, upstreamNonCN []string, cnDomains *utils.Trie, cacheName string, socksPort int) *DNSServer {
+func NewDNSServer(cfg ServerConfig, cache *DNSCache, upstreamCN []string, upstreamNonCN []string, cnDomains *Trie, cacheName string, socksPort int) *DNSServer {
 	server := &DNSServer{
 		Config:        cfg,
 		Cache:         cache,
@@ -39,10 +35,13 @@ func NewDNSServer(cfg config.ServerConfig, cache *cache.DNSCache, upstreamCN []s
 
 func (s *DNSServer) initSocksDialer() {
 	var err error
-	s.socksDialer, err = proxy.SOCKS5("tcp", "127.0.0.1:"+strconv.Itoa(s.SocksPort), nil, proxy.Direct)
+	client, err := socks5.NewClient(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), "", "", 5, 5)
 	if err != nil {
-		fmt.Printf("Failed to create SOCKS5 dialer: %v\n", err)
+		fmt.Printf("Failed to create SOCKS5 client: %v\n", err)
+		return
 	}
+	s.socksDialer = client
+	fmt.Printf("SOCKS5 %s client created\n", client.Server)
 }
 
 func (s *DNSServer) StartTransparentUDP(port int) error {
@@ -74,11 +73,7 @@ func (s *DNSServer) StartTransparentUDP(port int) error {
 		go func(b []byte, a net.Addr) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			s.handleRequest(conn, a, b)
+			handleDNSRequest(s, conn, a, b)
 		}(buffer[:n], addr)
 	}
-}
-
-func (s *DNSServer) handleRequest(conn net.PacketConn, addr net.Addr, msg []byte) {
-	handleDNSRequest(s, conn, addr, msg)
 }
