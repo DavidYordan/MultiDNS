@@ -24,17 +24,18 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 		return
 	}
 
+	clientAddr := addr.String()
+
 	if len(dnsMsg.Question) > 1 {
 		response, source, err := handleMultipleQuestions(s, conn, &dnsMsg)
 		if err != nil {
 			fmt.Printf("Failed to handle multiple questions: %v\n", err)
 		}
 		sendResponse(conn, addr, response)
-		durationTotal := time.Since(start)
-		fmt.Printf("Client: %s, From: %s - %v\n", addr.String(), source, durationTotal)
+		durationTotal := time.Since(start).Seconds() * 1000
+		fmt.Printf("%.3fms - %s_%s - multipleQuestions\n", durationTotal, clientAddr, source)
 		return
 	} else {
-		clientAddr := addr.String()
 		question := dnsMsg.Question[0]
 		domain := question.Name
 		qtype := dns.TypeToString[question.Qtype]
@@ -57,8 +58,8 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 		}
 
 		sendResponse(conn, addr, packedResponse)
-		durationTotal := time.Since(start)
-		fmt.Printf("Client: %s, Domain: %s, From: %s - %v\n", clientAddr, question.Name, source, durationTotal)
+		durationTotal := time.Since(start).Seconds() * 1000
+		fmt.Printf("%.3fms - %s_%s - %s\n", durationTotal, clientAddr, source, question.Name)
 	}
 }
 
