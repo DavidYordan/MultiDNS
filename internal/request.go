@@ -15,12 +15,12 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 	var dnsMsg dns.Msg
 	err := dnsMsg.Unpack(msg)
 	if err != nil {
-		fmt.Printf("Failed to unpack DNS message: %v\n", err)
+		fmt.Printf("Error(Unpack): %d - %d - %v\n", s.SocksPort, len(msg), err)
 		return
 	}
 
 	if len(dnsMsg.Question) == 0 {
-		fmt.Printf("No questions in a DNS message\n")
+		fmt.Printf("Error(NoQuestion): %d\n", s.SocksPort)
 		return
 	}
 
@@ -29,9 +29,9 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 	if len(dnsMsg.Question) > 1 {
 		response, source, err := handleMultipleQuestions(s, conn, &dnsMsg)
 		if err != nil {
-			fmt.Printf("Failed to handle multiple questions: %v\n", err)
+			fmt.Printf("Error(HandleMultipleQuestions): %d - %v\n", s.SocksPort, err)
 		}
-		sendResponse(conn, addr, response)
+		sendRawUDPResponse(addr, response)
 		durationTotal := time.Since(start).Seconds() * 1000
 		fmt.Printf("%.3fms - %s_%s - multipleQuestions\n", durationTotal, clientAddr, source)
 		return
@@ -47,17 +47,17 @@ func handleDNSRequest(s *DNSServer, conn net.PacketConn, addr net.Addr, msg []by
 		isCN := s.Config.StreamSplit && s.CNDomains.Search(question.Name)
 		response, remainingTTL, source, err := s.Cache.GetOrUpdate(s, &dnsMsg, isCN, key)
 		if err != nil {
-			fmt.Printf("Failed to query upstream server for domain %s: %v\n", question.Name, err)
+			fmt.Printf("Error(GetOrUpdate): %d - %s - %v\n", s.SocksPort, question.Name, err)
 			return
 		}
 
 		packedResponse, err := unpackSetTTLAndID(response, dnsMsg.Id, remainingTTL)
 		if err != nil {
-			fmt.Printf("Failed to process response for domain %s: %v\n", question.Name, err)
+			fmt.Printf("Error(UnpackSetTTLAndID): %d - %s - %v\n", s.SocksPort, question.Name, err)
 			return
 		}
 
-		sendResponse(conn, addr, packedResponse)
+		sendRawUDPResponse(addr, packedResponse)
 		durationTotal := time.Since(start).Seconds() * 1000
 		fmt.Printf("%.3fms - %s_%s - %s\n", durationTotal, clientAddr, source, question.Name)
 	}
@@ -71,37 +71,22 @@ func handleMultipleQuestions(s *DNSServer, conn net.PacketConn, dnsMsg *dns.Msg)
 	isCN := s.Config.StreamSplit && s.CNDomains.Search(dnsMsg.Question[0].Name)
 	response, source, err := QueryUpstreamServer(s, dnsMsg, isCN)
 	if err != nil {
-		fmt.Printf("Failed to query upstream server: %v\n", err)
+		fmt.Printf("Error(QueryUpstreamServer): %d - %s - %v\n", s.SocksPort, dnsMsg.Question[0].Name, err)
 		return nil, source, err
 	}
 
 	packedResponse, err := unpackSetID(response, dnsMsg.Id)
 	if err != nil {
-		fmt.Printf("Failed to process response: %v\n", err)
+		fmt.Printf("Error(UnpackSetID): %d - %s - %v\n", s.SocksPort, dnsMsg.Question[0].Name, err)
 		return nil, source, err
 	}
 	return packedResponse, source, nil
 }
 
-func sendResponse(conn net.PacketConn, addr net.Addr, response []byte) error {
-	if conn != nil {
-		err := sendRawUDPResponse(addr, response)
-		if err != nil {
-			fmt.Printf("Failed to send raw UDP response: %v\n", err)
-		}
-		return err
-	}
-	err := sendRawTCPResponse(addr, response)
-	if err != nil {
-		fmt.Printf("Failed to send raw TCP response: %v\n", err)
-	}
-	return err
-}
-
 func sendRawUDPResponse(addr net.Addr, response []byte) error {
 	udpAddr, ok := addr.(*net.UDPAddr)
 	if !ok {
-		return fmt.Errorf("address is not UDPAddr")
+		return fmt.Errorf("Error(UDPAddr): address is not UDPAddr")
 	}
 
 	conn, err := net.ListenPacket("ip4:udp", "0.0.0.0")
@@ -139,26 +124,6 @@ func sendRawUDPResponse(addr net.Addr, response []byte) error {
 	payload := append(udpHeader.Marshal(), response...)
 
 	return rawConn.WriteTo(header, payload, nil)
-}
-
-func sendRawTCPResponse(addr net.Addr, response []byte) error {
-	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok {
-		return fmt.Errorf("address is not TCPAddr")
-	}
-
-	conn, err := net.Dial("tcp", tcpAddr.String())
-	if err != nil {
-		return fmt.Errorf("Failed to create TCP connection: %v", err)
-	}
-	defer conn.Close()
-
-	_, err = conn.Write(response)
-	if err != nil {
-		return fmt.Errorf("Failed to send TCP response: %v", err)
-	}
-
-	return nil
 }
 
 func udpChecksum(header *ipv4.Header, payload []byte) uint16 {

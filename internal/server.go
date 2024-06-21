@@ -60,7 +60,7 @@ func (s *DNSServer) StartTransparentUDP(port int) error {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 100)
 
-	buffer := make([]byte, 512)
+	buffer := make([]byte, 4096)
 	for {
 		n, addr, err := conn.ReadFrom(buffer)
 		if err != nil {

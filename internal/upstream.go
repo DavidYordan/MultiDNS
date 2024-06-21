@@ -2,7 +2,9 @@ package internal
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -27,14 +29,16 @@ func QueryUpstreamServer(s *DNSServer, dnsMsg *dns.Msg, isCN bool) ([]byte, stri
 	}, len(upstreamServers))
 	var wg sync.WaitGroup
 
-	queryFunc := queryDirectUDP
-	if !isCN {
-		queryFunc = querySocksMethods
-	}
-
-	for _, upstreamAddr := range upstreamServers {
-		wg.Add(1)
-		go queryFunc(ctx, dnsMsg, upstreamAddr, s.socksDialer, resultChan, &wg)
+	if isCN {
+		for _, upstreamAddr := range upstreamServers {
+			wg.Add(1)
+			go queryDirectUDP(ctx, dnsMsg, upstreamAddr, s.socksDialer, resultChan, &wg)
+		}
+	} else {
+		for _, upstreamAddr := range upstreamServers {
+			wg.Add(1)
+			go querySocksMethods(ctx, dnsMsg, upstreamAddr, s.socksDialer, resultChan, &wg, s.Config.StreamUot)
+		}
 	}
 
 	go func() {
@@ -99,10 +103,17 @@ func querySocksMethods(ctx context.Context, dnsMsg *dns.Msg, upstreamAddr string
 	response []byte
 	server   string
 	err      error
-}, wg *sync.WaitGroup) {
+}, wg *sync.WaitGroup, useTCP bool) {
 	defer wg.Done()
 
-	response, err := queryThroughSocks5UDP(dnsMsg, dialer, upstreamAddr)
+	var response []byte
+	var err error
+	if useTCP {
+		response, err = queryThroughSocks5TCP(dnsMsg, dialer, upstreamAddr)
+	} else {
+		response, err = queryThroughSocks5UDP(dnsMsg, dialer, upstreamAddr)
+	}
+
 	if err == nil {
 		sendResult(fmt.Sprintf("%s", upstreamAddr), response, nil, resultChan)
 	} else {
@@ -110,31 +121,87 @@ func querySocksMethods(ctx context.Context, dnsMsg *dns.Msg, upstreamAddr string
 	}
 }
 
-func queryThroughSocks5UDP(dnsMsg *dns.Msg, dialer *socks5.Client, upstreamAddr string) ([]byte, error) {
-	conn, err := dialer.Dial("udp", upstreamAddr+":53")
+func queryThroughSocks5TCP(dnsMsg *dns.Msg, dialer *socks5.Client, upstreamAddr string) ([]byte, error) {
+	conn, err := dialer.Dial("tcp", upstreamAddr+":53")
 	if err != nil {
+		fmt.Printf("Error(Dial): TCP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
 		return nil, err
 	}
 	defer conn.Close()
 
 	msg, err := dnsMsg.Pack()
 	if err != nil {
+		fmt.Printf("Error(Pack): TCP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
+		return nil, err
+	}
+
+	lengthMsg := make([]byte, 2+len(msg))
+	binary.BigEndian.PutUint16(lengthMsg[:2], uint16(len(msg)))
+	copy(lengthMsg[2:], msg)
+
+	_, err = conn.Write(lengthMsg)
+	if err != nil {
+		fmt.Printf("Error(Write): TCP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
+		return nil, err
+	}
+
+	var lengthBuf [2]byte
+	_, err = io.ReadFull(conn, lengthBuf[:])
+	if err != nil {
+		fmt.Printf("Error(ReadFull): TCP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
+		return nil, err
+	}
+	length := binary.BigEndian.Uint16(lengthBuf[:])
+
+	response := make([]byte, length)
+	_, err = io.ReadFull(conn, response)
+	if err != nil {
+		fmt.Printf("Error(ReadFull): TCP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
+		return nil, err
+	}
+
+	return response, nil
+}
+
+func queryThroughSocks5UDP(dnsMsg *dns.Msg, dialer *socks5.Client, upstreamAddr string) ([]byte, error) {
+	conn, err := dialer.Dial("udp", upstreamAddr+":53")
+	if err != nil {
+		fmt.Printf("Error(Dial): UDP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
+		return nil, err
+	}
+	defer conn.Close()
+
+	msg, err := dnsMsg.Pack()
+	if err != nil {
+		fmt.Printf("Error(Pack): UDP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
 		return nil, err
 	}
 
 	_, err = conn.Write(msg)
 	if err != nil {
+		fmt.Printf("Error(Write): UDP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
 		return nil, err
 	}
 
-	response := make([]byte, 512)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := conn.Read(response)
+	initialBufferSize := 512
+	buffer := make([]byte, initialBufferSize)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	n, err := conn.Read(buffer)
 	if err != nil {
+		fmt.Printf("Error(Read): UDP %s_%s - %v\n", dialer.Server, upstreamAddr, err)
 		return nil, err
 	}
 
-	return response[:n], nil
+	if n == initialBufferSize {
+		extendedBuffer := make([]byte, 4096)
+		extendedN, err := conn.Read(extendedBuffer)
+		if err == nil && extendedN > 0 {
+			buffer = append(buffer, extendedBuffer[:extendedN]...)
+			n += extendedN
+		}
+	}
+
+	return buffer[:n], nil
 }
 
 func sendResult(server string, response []byte, err error, resultChan chan struct {
