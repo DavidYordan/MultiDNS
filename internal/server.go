@@ -47,12 +47,12 @@ func initHTTPClientsCN(upstreamCN []string) {
 	for _, upstream := range upstreamCN {
 		httpClientsCN[upstream] = &http.Client{
 			Transport: &http.Transport{
-				MaxIdleConns:          100,
-				MaxIdleConnsPerHost:   5,
-				MaxConnsPerHost:       20,
-				IdleConnTimeout:       90 * time.Second,
+				MaxIdleConns:          50,
+				MaxIdleConnsPerHost:   20,
+				MaxConnsPerHost:       50,
+				IdleConnTimeout:       1 * time.Hour,
 				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
+				ExpectContinueTimeout: 0,
 			},
 			Timeout: 10 * time.Second,
 		}
@@ -71,10 +71,10 @@ func (s *DNSServer) initHTTPClientsNonCN() {
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return socksDialer.Dial("tcp", addr)
 				},
-				MaxIdleConns:          100,
+				MaxIdleConns:          20,
 				MaxIdleConnsPerHost:   5,
 				MaxConnsPerHost:       20,
-				IdleConnTimeout:       90 * time.Second,
+				IdleConnTimeout:       1 * time.Hour,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 			},
