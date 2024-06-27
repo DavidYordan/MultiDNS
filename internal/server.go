@@ -1,47 +1,86 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/txthinking/socks5"
 )
 
+var httpClientsCN map[string]*http.Client
+
 type DNSServer struct {
-	Config        ServerConfig
-	Cache         *DNSCache
-	UpstreamCN    []string
-	UpstreamNonCN []string
-	CNDomains     *Trie
-	CacheName     string
-	SocksPort     int
-	socksDialer   *socks5.Client
+	Config           ServerConfig
+	Cache            *DNSCache
+	UpstreamCN       []string
+	UpstreamNonCN    []string
+	CNDomains        *Trie
+	CacheName        string
+	SocksPort        int
+	httpClientsNonCN map[string]*http.Client
 }
 
 func NewDNSServer(cfg ServerConfig, cache *DNSCache, upstreamCN []string, upstreamNonCN []string, cnDomains *Trie, cacheName string, socksPort int) *DNSServer {
-	server := &DNSServer{
-		Config:        cfg,
-		Cache:         cache,
-		UpstreamCN:    upstreamCN,
-		UpstreamNonCN: upstreamNonCN,
-		CNDomains:     cnDomains,
-		CacheName:     cacheName,
-		SocksPort:     socksPort,
+	if httpClientsCN == nil {
+		httpClientsCN = make(map[string]*http.Client)
+		initHTTPClientsCN(upstreamCN)
 	}
-	server.initSocksDialer()
+	server := &DNSServer{
+		Config:           cfg,
+		Cache:            cache,
+		UpstreamCN:       upstreamCN,
+		UpstreamNonCN:    upstreamNonCN,
+		CNDomains:        cnDomains,
+		CacheName:        cacheName,
+		SocksPort:        socksPort,
+		httpClientsNonCN: make(map[string]*http.Client),
+	}
+	server.initHTTPClientsNonCN()
 	return server
 }
 
-func (s *DNSServer) initSocksDialer() {
-	var err error
-	client, err := socks5.NewClient(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), "", "", 5, 5)
-	if err != nil {
-		fmt.Printf("Failed to create SOCKS5 client: %v\n", err)
-		return
+func initHTTPClientsCN(upstreamCN []string) {
+	for _, upstream := range upstreamCN {
+		httpClientsCN[upstream] = &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   5,
+				MaxConnsPerHost:       20,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
+			Timeout: 10 * time.Second,
+		}
 	}
-	s.socksDialer = client
-	fmt.Printf("SOCKS5 %s client created\n", client.Server)
+}
+
+func (s *DNSServer) initHTTPClientsNonCN() {
+	for _, upstream := range s.UpstreamNonCN {
+		socksDialer, err := socks5.NewClient(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), "", "", 5, 5)
+		if err != nil {
+			fmt.Printf("Failed to create SOCKS5 client for %s: %v\n", upstream, err)
+			continue
+		}
+		s.httpClientsNonCN[upstream] = &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return socksDialer.Dial("tcp", addr)
+				},
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   5,
+				MaxConnsPerHost:       20,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
+			Timeout: 10 * time.Second,
+		}
+	}
 }
 
 func (s *DNSServer) StartTransparentUDP(port int) error {

@@ -11,7 +11,6 @@ import (
 type ServerConfig struct {
 	Segment     int  `yaml:"segment"`
 	StreamSplit bool `yaml:"stream_split"`
-	StreamUot   bool `yaml:"stream_uot"`
 }
 
 type Config struct {
